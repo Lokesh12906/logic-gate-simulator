@@ -1,0 +1,373 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logic Gate Simulator</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#f5f5f5;display:flex;flex-direction:column;height:100vh}
+#toolbar{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px;background:#fff;border-bottom:1px solid #ddd;align-items:center}
+.tb-label{font-size:11px;color:#888;margin-right:2px}
+.tb-group{display:flex;gap:4px;align-items:center}
+button{font-size:12px;padding:5px 11px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#222;cursor:pointer;transition:background 0.15s}
+button:hover{background:#f0f0f0}
+button.accent{border-color:#185FA5;color:#185FA5;font-weight:600}
+button.accent:hover{background:#e6f1fb}
+button.danger{border-color:#c0392b;color:#c0392b}
+button.danger:hover{background:#fdf0ef}
+#canvas-wrap{flex:1;position:relative;overflow:hidden}
+canvas{position:absolute;top:0;left:0}
+#truth-panel{position:absolute;right:0;top:0;bottom:0;width:280px;background:#fff;border-left:1px solid #ddd;overflow-y:auto;display:none;padding:14px}
+#truth-panel h3{font-size:14px;font-weight:600;margin-bottom:10px}
+#truth-table{width:100%;border-collapse:collapse;font-size:12px}
+#truth-table th{background:#f5f5f5;padding:6px 8px;text-align:center;border:1px solid #ddd;font-weight:600}
+#truth-table td{padding:5px 8px;text-align:center;border:1px solid #ddd}
+#truth-table tr.true td:last-child{background:#eaf3de;color:#3b6d11;font-weight:600}
+#truth-table tr.false td:last-child{background:#fceaea;color:#a32d2d}
+#statusbar{font-size:11px;color:#888;padding:5px 14px;background:#fafafa;border-top:1px solid #eee}
+#help{font-size:11px;color:#aaa;margin-left:auto}
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="tb-group">
+    <span class="tb-label">Gates</span>
+    <button onclick="addGate('AND')">AND</button>
+    <button onclick="addGate('OR')">OR</button>
+    <button onclick="addGate('NOT')">NOT</button>
+    <button onclick="addGate('NAND')">NAND</button>
+    <button onclick="addGate('NOR')">NOR</button>
+    <button onclick="addGate('XOR')">XOR</button>
+    <button onclick="addGate('XNOR')">XNOR</button>
+  </div>
+  <div class="tb-group">
+    <span class="tb-label">I/O</span>
+    <button onclick="addGate('INPUT')">Input</button>
+    <button onclick="addGate('OUTPUT')">Output</button>
+  </div>
+  <div class="tb-group" style="margin-left:auto">
+    <button class="accent" onclick="generateTruthTable()">⊞ Truth Table</button>
+    <button class="danger" onclick="deleteSelected()">✕ Delete</button>
+    <button onclick="clearAll()">Clear</button>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="bg"></canvas>
+  <canvas id="main"></canvas>
+  <div id="truth-panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3>Truth Table</h3>
+      <button onclick="closeTruth()" style="padding:2px 8px;font-size:11px">✕ Close</button>
+    </div>
+    <div id="truth-content"></div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <span id="status">Add gates from the toolbar. Click red output port → blue input port to connect. Double-click an Input to toggle it.</span>
+</div>
+
+<script>
+const canvas = document.getElementById('main');
+const ctx = canvas.getContext('2d');
+const bgCanvas = document.getElementById('bg');
+const bgCtx = bgCanvas.getContext('2d');
+const wrap = document.getElementById('canvas-wrap');
+
+let nodes = [], wires = [], selected = null, dragging = null, dragOff = {x:0,y:0};
+let connectFrom = null;
+let nextId = 1;
+let inputCount = 0, outputCount = 0;
+
+const GATE_W = 76, GATE_H = 48;
+
+function resize() {
+  const r = wrap.getBoundingClientRect();
+  [canvas, bgCanvas].forEach(c => { c.width = r.width; c.height = r.height; });
+  drawBg();
+  render();
+}
+
+function drawBg() {
+  const w = bgCanvas.width, h = bgCanvas.height;
+  bgCtx.clearRect(0,0,w,h);
+  bgCtx.strokeStyle = 'rgba(0,0,0,0.06)';
+  bgCtx.lineWidth = 0.5;
+  for(let x=0;x<w;x+=24){bgCtx.beginPath();bgCtx.moveTo(x,0);bgCtx.lineTo(x,h);bgCtx.stroke();}
+  for(let y=0;y<h;y+=24){bgCtx.beginPath();bgCtx.moveTo(0,y);bgCtx.lineTo(w,y);bgCtx.stroke();}
+}
+
+const COLORS = {
+  AND:  {bg:'#dbeafe',border:'#93c5fd',text:'#1e40af'},
+  OR:   {bg:'#d1fae5',border:'#6ee7b7',text:'#065f46'},
+  NOT:  {bg:'#fee2e2',border:'#fca5a5',text:'#991b1b'},
+  NAND: {bg:'#fef9c3',border:'#fde047',text:'#713f12'},
+  NOR:  {bg:'#fce7f3',border:'#f9a8d4',text:'#831843'},
+  XOR:  {bg:'#ede9fe',border:'#c4b5fd',text:'#4c1d95'},
+  XNOR: {bg:'#ffedd5',border:'#fdba74',text:'#7c2d12'},
+  INPUT:{bg:'#dcfce7',border:'#86efac',text:'#14532d'},
+  OUTPUT:{bg:'#fef3c7',border:'#fcd34d',text:'#78350f'},
+};
+
+function numInputs(type){return (type==='NOT'||type==='OUTPUT')?1:type==='INPUT'?0:2;}
+function numOutputs(type){return type==='OUTPUT'?0:1;}
+
+function portPos(node, isInput, idx) {
+  const ni = numInputs(node.type);
+  if(isInput) {
+    const step = GATE_H / (ni + 1);
+    return {x: node.x, y: node.y + step*(idx+1)};
+  }
+  return {x: node.x + GATE_W, y: node.y + GATE_H/2};
+}
+
+function drawNode(node) {
+  const {x,y,type,value,label} = node;
+  const c = COLORS[type];
+  const isSel = selected===node;
+  const isConnSrc = connectFrom&&connectFrom.node===node;
+
+  ctx.save();
+  ctx.fillStyle = c.bg;
+  ctx.strokeStyle = isSel ? '#2563eb' : isConnSrc ? '#16a34a' : c.border;
+  ctx.lineWidth = isSel ? 2.5 : 1.5;
+  ctx.beginPath();
+  ctx.roundRect(x, y, GATE_W, GATE_H, 8);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = c.text;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  if(type==='INPUT'||type==='OUTPUT') {
+    ctx.font = '500 11px system-ui,sans-serif';
+    ctx.fillText(label, x+GATE_W/2, y+GATE_H/2-8);
+    ctx.font = 'bold 16px system-ui,sans-serif';
+    ctx.fillText(value===null?'?':(value?'1':'0'), x+GATE_W/2, y+GATE_H/2+8);
+  } else {
+    ctx.font = 'bold 13px system-ui,sans-serif';
+    ctx.fillText(type, x+GATE_W/2, y+GATE_H/2);
+  }
+
+  // input ports
+  const ni = numInputs(type);
+  for(let i=0;i<ni;i++) {
+    const p = portPos(node,true,i);
+    ctx.beginPath(); ctx.arc(p.x,p.y,5,0,Math.PI*2);
+    ctx.fillStyle = connectFrom ? '#16a34a' : '#3b82f6';
+    ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+  }
+  // output port
+  if(numOutputs(type)>0) {
+    const p = portPos(node,false,0);
+    ctx.beginPath(); ctx.arc(p.x,p.y,5,0,Math.PI*2);
+    ctx.fillStyle = '#ef4444'; ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawWire(w) {
+  const from = portPos(w.fromNode,false,0);
+  const to   = portPos(w.toNode,true,w.toPort);
+  const mx = (from.x+to.x)/2;
+  ctx.save();
+  ctx.strokeStyle = w.value ? '#16a34a' : '#94a3b8';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(from.x,from.y);
+  ctx.bezierCurveTo(mx,from.y,mx,to.y,to.x,to.y);
+  ctx.stroke();
+  // signal dot
+  ctx.beginPath(); ctx.arc((from.x+to.x)/2,(from.y+to.y)/2,3,0,Math.PI*2);
+  ctx.fillStyle = w.value ? '#16a34a' : '#94a3b8';
+  ctx.fill();
+  ctx.restore();
+}
+
+function evaluate(node, visited=new Set()) {
+  if(node.type==='INPUT') return node.value;
+  if(visited.has(node.id)) return false;
+  visited.add(node.id);
+  const inW = wires.filter(w=>w.toNode===node);
+  const vals = inW.map(w=>evaluate(w.fromNode, new Set(visited)));
+  const a=vals[0]??false, b=vals[1]??false;
+  switch(node.type) {
+    case 'AND':  return vals.length<2?false:a&&b;
+    case 'OR':   return vals.length<2?false:a||b;
+    case 'NOT':  return vals.length<1?false:!a;
+    case 'NAND': return vals.length<2?false:!(a&&b);
+    case 'NOR':  return vals.length<2?false:!(a||b);
+    case 'XOR':  return vals.length<2?false:a!==b;
+    case 'XNOR': return vals.length<2?false:a===b;
+    case 'OUTPUT': return vals.length<1?null:a;
+  }
+  return false;
+}
+
+function simulate() {
+  wires.forEach(w=>{ w.value = evaluate(w.fromNode); });
+  nodes.forEach(n=>{ if(n.type==='OUTPUT') n.value=evaluate(n); });
+}
+
+function render() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  simulate();
+  wires.forEach(drawWire);
+  nodes.forEach(drawNode);
+  if(connectFrom&&connectFrom.mouse) {
+    const p = portPos(connectFrom.node,false,0);
+    ctx.save();
+    ctx.strokeStyle='#16a34a'; ctx.lineWidth=1.5; ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(connectFrom.mouse.x,connectFrom.mouse.y);
+    ctx.stroke(); ctx.restore();
+  }
+}
+
+function addGate(type) {
+  const cx=100+Math.random()*300, cy=80+Math.random()*250;
+  let label=type;
+  if(type==='INPUT')  label='In' +(++inputCount);
+  if(type==='OUTPUT') label='Out'+(++outputCount);
+  nodes.push({id:nextId++,type,x:cx,y:cy,value:type==='INPUT'?false:null,label});
+  render();
+  setStatus('Added '+label+'. Drag to reposition. Click the red port to start a wire.');
+}
+
+function dist(x1,y1,x2,y2){return Math.sqrt((x1-x2)**2+(y1-y2)**2);}
+
+function hitTest(mx,my) {
+  for(let i=nodes.length-1;i>=0;i--) {
+    const n=nodes[i];
+    const no=numOutputs(n.type);
+    if(no>0){const p=portPos(n,false,0);if(dist(mx,my,p.x,p.y)<8)return{node:n,part:'output'};}
+    const ni=numInputs(n.type);
+    for(let j=0;j<ni;j++){const p=portPos(n,true,j);if(dist(mx,my,p.x,p.y)<8)return{node:n,part:'input',portIdx:j};}
+    if(mx>=n.x&&mx<=n.x+GATE_W&&my>=n.y&&my<=n.y+GATE_H)return{node:n,part:'body'};
+  }
+  return null;
+}
+
+canvas.addEventListener('mousedown',e=>{
+  const r=canvas.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
+  const hit=hitTest(mx,my);
+  if(!hit){selected=null;connectFrom=null;render();return;}
+  if(hit.part==='output'){
+    connectFrom={node:hit.node,mouse:{x:mx,y:my}};
+    selected=hit.node; render(); return;
+  }
+  if(hit.part==='input'&&connectFrom){
+    if(connectFrom.node===hit.node){connectFrom=null;render();return;}
+    wires=wires.filter(w=>!(w.toNode===hit.node&&w.toPort===hit.portIdx));
+    wires.push({fromNode:connectFrom.node,toNode:hit.node,toPort:hit.portIdx,value:false});
+    connectFrom=null; selected=null; render();
+    setStatus('Connected! Hit "⊞ Truth Table" to analyze the circuit.');
+    return;
+  }
+  connectFrom=null;
+  selected=hit.node;
+  dragging=hit.node;
+  dragOff={x:mx-hit.node.x,y:my-hit.node.y};
+  render();
+});
+
+canvas.addEventListener('mousemove',e=>{
+  const r=canvas.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
+  if(connectFrom){connectFrom.mouse={x:mx,y:my};render();return;}
+  if(dragging){dragging.x=mx-dragOff.x;dragging.y=my-dragOff.y;render();}
+});
+
+canvas.addEventListener('mouseup',()=>{dragging=null;});
+
+canvas.addEventListener('dblclick',e=>{
+  const r=canvas.getBoundingClientRect();
+  const hit=hitTest(e.clientX-r.left,e.clientY-r.top);
+  if(hit&&hit.node.type==='INPUT'){
+    hit.node.value=!hit.node.value;
+    render();
+    setStatus(hit.node.label+' toggled to '+(hit.node.value?'1':'0'));
+  }
+});
+
+document.addEventListener('keydown',e=>{
+  if((e.key==='Delete'||e.key==='Backspace')&&selected){
+    deleteSelected();
+  }
+});
+
+function deleteSelected(){
+  if(!selected)return;
+  wires=wires.filter(w=>w.fromNode!==selected&&w.toNode!==selected);
+  nodes=nodes.filter(n=>n!==selected);
+  selected=null; render();
+  setStatus('Gate deleted.');
+}
+
+function clearAll(){
+  nodes=[];wires=[];selected=null;connectFrom=null;
+  inputCount=0;outputCount=0;nextId=1;
+  closeTruth();render();
+  setStatus('Board cleared.');
+}
+
+function generateTruthTable(){
+  const inputs=nodes.filter(n=>n.type==='INPUT');
+  const outputs=nodes.filter(n=>n.type==='OUTPUT');
+  if(!inputs.length){setStatus('Add at least one Input node first.');return;}
+  if(!outputs.length){setStatus('Add at least one Output node first.');return;}
+  if(inputs.length>5){setStatus('Max 5 inputs supported for truth table.');return;}
+
+  document.getElementById('truth-panel').style.display='block';
+  const rows=1<<inputs.length;
+  const origVals=inputs.map(n=>n.value);
+
+  let html='<table id="truth-table"><thead><tr>';
+  inputs.forEach(n=>html+=`<th>${n.label}</th>`);
+  outputs.forEach(n=>html+=`<th>${n.label}</th>`);
+  html+='</tr></thead><tbody>';
+
+  for(let r=0;r<rows;r++){
+    const bits=inputs.map((_,i)=>!!(r>>(inputs.length-1-i)&1));
+    inputs.forEach((n,i)=>n.value=bits[i]);
+    simulate();
+    const outVals=outputs.map(n=>n.value);
+    const anyTrue=outVals.some(v=>v===true);
+    html+=`<tr class="${anyTrue?'true':'false'}">`;
+    bits.forEach(b=>html+=`<td>${b?1:0}</td>`);
+    outVals.forEach(v=>html+=`<td>${v===null?'?':(v?1:0)}</td>`);
+    html+='</tr>';
+  }
+  html+='</tbody></table>';
+  document.getElementById('truth-content').innerHTML=html;
+
+  inputs.forEach((n,i)=>n.value=origVals[i]);
+  simulate(); render();
+  setStatus('Truth table generated — '+inputs.length+' input(s), '+outputs.length+' output(s), '+(rows)+' rows.');
+}
+
+function closeTruth(){document.getElementById('truth-panel').style.display='none';}
+function setStatus(msg){document.getElementById('status').textContent=msg;}
+
+new ResizeObserver(resize).observe(wrap);
+resize();
+
+// default demo: AND gate
+addGate('INPUT');  nodes[nodes.length-1].x=60;  nodes[nodes.length-1].y=100;
+addGate('INPUT');  nodes[nodes.length-1].x=60;  nodes[nodes.length-1].y=190;
+addGate('AND');    nodes[nodes.length-1].x=220;  nodes[nodes.length-1].y=135;
+addGate('OUTPUT'); nodes[nodes.length-1].x=380;  nodes[nodes.length-1].y=145;
+wires.push({fromNode:nodes[0],toNode:nodes[2],toPort:0,value:false});
+wires.push({fromNode:nodes[1],toNode:nodes[2],toPort:1,value:false});
+wires.push({fromNode:nodes[2],toNode:nodes[3],toPort:0,value:false});
+render();
+setStatus('Demo loaded: AND gate. Double-click inputs to toggle. Try Truth Table!');
+</script>
+</body>
+</html>
+
